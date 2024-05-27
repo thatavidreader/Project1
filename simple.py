@@ -13,7 +13,7 @@ import sqlite3
 
 logging.basicConfig(level=logging.DEBUG) #login
 
-kite = KiteConnect(api_key="tcic9nehief6209i") #replace with api key
+kite = KiteConnect(api_key="api_key") #replace with api key
 kite.set_access_token("your_access_token") #replace with access token
 
 
