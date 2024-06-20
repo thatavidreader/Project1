@@ -1,29 +1,22 @@
-# 1. initialise kiteconnect api
-# 2. add stock tokens
-# 3. create database
-# 4. get historical data
-# 5. store in database
-# 6. retrieve from database
-# 7. calculate candle type (bearish bullish) candle trends and (support resistance)
-
 import logging
 from kiteconnect import KiteConnect
 import datetime
 import sqlite3
 
-logging.basicConfig(level=logging.DEBUG) #login
+logging.basicConfig(level=logging.DEBUG)  
 
-kite = KiteConnect(api_key="api_key") #replace with api key
-kite.set_access_token("your_access_token") #replace with access token
+# initialize Kite Connect client
+kite = KiteConnect(api_key="tcic9nehief6209i")
+kite.set_access_token("api_key")
 
-
+#add stock tokens
 stock_tokens = {
-    "RELIANCE": 738561, #add stock token
-
+    "RELIANCE": 738561,
+    "INFY": 408065,
 }
 
-#create sqlite database
-def create_database():
+# create/update database and tables
+def create_or_update_database():
     conn = sqlite3.connect("stocks.db")
     cursor = conn.cursor()
     for stock in stock_tokens.keys():
@@ -34,13 +27,37 @@ def create_database():
                 high REAL,
                 low REAL,
                 close REAL,
-                volume INTEGER
+                volume INTEGER,
+                candle_pattern TEXT,
+                candle_direction TEXT,
+                trend TEXT,
+                support_1 REAL,
+                resistance_1 REAL,
+                support_2 REAL,
+                resistance_2 REAL
             )
         """)
+
+        cursor.execute(f"PRAGMA table_info({stock})")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'candle_pattern' not in columns:
+            cursor.execute(f"ALTER TABLE {stock} ADD COLUMN candle_pattern TEXT")
+        if 'candle_direction' not in columns:
+            cursor.execute(f"ALTER TABLE {stock} ADD COLUMN candle_direction TEXT")
+        if 'trend' not in columns:
+            cursor.execute(f"ALTER TABLE {stock} ADD COLUMN trend TEXT")
+        if 'support_1' not in columns:
+            cursor.execute(f"ALTER TABLE {stock} ADD COLUMN support_1 REAL")
+        if 'resistance_1' not in columns:
+            cursor.execute(f"ALTER TABLE {stock} ADD COLUMN resistance_1 REAL")
+        if 'support_2' not in columns:
+            cursor.execute(f"ALTER TABLE {stock} ADD COLUMN support_2 REAL")
+        if 'resistance_2' not in columns:
+            cursor.execute(f"ALTER TABLE {stock} ADD COLUMN resistance_2 REAL")
     conn.commit()
     conn.close()
 
-# get historical data
+# fetcj historical data
 def fetch_historical_data(instrument_token, from_date, to_date, interval="day"):
     data = kite.historical_data(
         instrument_token=instrument_token,
@@ -50,20 +67,66 @@ def fetch_historical_data(instrument_token, from_date, to_date, interval="day"):
     )
     return data
 
-# store data in database
-def store_data_in_database(stock, data):
+# find the type of candlestick pattern
+def determine_candle_pattern(record):
+    body = abs(record["close"] - record["open"])
+    upper_shadow = record["high"] - max(record["close"], record["open"])
+    lower_shadow = min(record["close"], record["open"]) - record["low"]
+    
+    if body == 0:
+        return "Doji"
+    elif body / (record["high"] - record["low"]) > 0.8:
+        return "Marubozu"
+    elif lower_shadow > 2 * body and record["close"] > record["open"]:
+        return "Hammer"
+    elif lower_shadow > 2 * body and record["close"] < record["open"]:
+        return "Hanging Man"
+    elif upper_shadow > 2 * body and record["close"] < record["open"]:
+        return "Shooting Star"
+    elif upper_shadow > 2 * body and record["close"] > record["open"]:
+        return "Inverted Hammer"
+    else:
+        return "Normal"
+
+# determineBullish or Bearish
+def determine_candle_direction(record):
+    if record["close"] > record["open"]:
+        return "Bullish"
+    elif record["close"] < record["open"]:
+        return "Bearish"
+    else:
+        return "Neutral"
+
+# calculate support and resistance using pivot points
+def calculate_support_resistance(record):
+    pivot_point = (record["high"] + record["low"] + record["close"]) / 3
+    support_1 = (2 * pivot_point) - record["high"]
+    resistance_1 = (2 * pivot_point) - record["low"]
+    support_2 = pivot_point - (record["high"] - record["low"])
+    resistance_2 = pivot_point + (record["high"] - record["low"])
+    return support_1, resistance_1, support_2, resistance_2
+
+#support of last five days, 
+# support_1 = 
+
+# store data in SQLite database
+def store_data_in_database(stock, data, trends):
     conn = sqlite3.connect("stocks.db")
     cursor = conn.cursor()
     for record in data:
+        candle_pattern = determine_candle_pattern(record)
+        candle_direction = determine_candle_direction(record)
+        trend = trends.get(record["date"], "Sideway")
+        support_1, resistance_1, support_2, resistance_2 = calculate_support_resistance(record)
         cursor.execute(f"""
-            INSERT OR REPLACE INTO {stock} (date, open, high, low, close, volume)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (record["date"], record["open"], record["high"],
-              record["low"], record["close"], record["volume"]))
+            INSERT OR REPLACE INTO {stock} (date, open, high, low, close, volume, candle_pattern, candle_direction, trend, support_1, resistance_1, support_2, resistance_2)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (record["date"], record["open"], record["high"], record["low"], record["close"], record["volume"],
+              candle_pattern, candle_direction, trend, support_1, resistance_1, support_2, resistance_2))
     conn.commit()
     conn.close()
 
-# get data from database
+# get data from SQLite database
 def fetch_data_from_db(stock):
     conn = sqlite3.connect("stocks.db")
     cursor = conn.cursor()
@@ -72,72 +135,48 @@ def fetch_data_from_db(stock):
     conn.close()
     return rows
 
-# calculate support and resistance
-def calculate_support_resistance(data):
-    sorted_data = sorted(data, key=lambda x: x[0], reverse=True)
-    periods = [3, 5, 10, 15, 20, 120, 240]
-    support_resistance = {}
-
-    for period in periods:
-        period_data = sorted_data[:period]
-        lows = [d[4] for d in period_data]
-        highs = [d[3] for d in period_data]
-        support_resistance[period] = {
-            'support': sorted(lows)[:3],
-            'resistance': sorted(highs, reverse=True)[:3]
-        }
-
-    return support_resistance
-
-# Identify candle type
-def identify_candle_type(data):
-    candles = []
-    for record in data[-30:]:
-        open_price = record[1]
-        close_price = record[4]
-
-        if close_price > open_price:
-            candle_type = "Bullish"
-        elif close_price < open_price:
-            candle_type = "Bearish"
+# calculate trend based on the last 5 days
+def calculate_trend(data):
+    trends = {}
+    sorted_data = sorted(data, key=lambda x: x[0])
+    for i in range(5, len(sorted_data)):
+        period_data = sorted_data[i-5:i]
+        closes = [d[4] for d in period_data]
+        if closes[-1] > closes[0]:
+            trend = "Uptrend"
+        elif closes[-1] < closes[0]:
+            trend = "Downtrend"
         else:
-            candle_type = "Doji"
-
-        candles.append({
-            'date': record[0],
-            'type': candle_type
-        })
-    return candles
-
-# identify candle trends
-def identify_trends(data):
-    trends = []
-    for i in range(-30, 0):
-        if i-5 >= -len(data):
-            trend_data = data[i-5:i]
-            closes = [d[4] for d in trend_data]
-            if closes[-1] > closes[0] and closes[-1] > closes[-2]:
-                trend = "Uptrend"
-            elif closes[-1] < closes[0] and closes[-1] < closes[-2]:
-                trend = "Downtrend"
-            elif closes[-1] > closes[-2] and closes[-2] < closes[-3]:
-                trend = "Uptrend Reversal"
-            elif closes[-1] < closes[-2] and closes[-2] > closes[-3]:
-                trend = "Downtrend Reversal"
-            else:
-                trend = "Sideway Movement"
-            trends.append({
-                'date': data[i][0],
-                'trend': trend
-            })
+            trend = "Sideway"
+        trends[sorted_data[i][0]] = trend
     return trends
 
+# determine buy value and stop loss
+def determine_buy_and_stop_loss(data):
+    latest_record = data[-1]
+    trend = latest_record[8]
+    support_1 = latest_record[9]
+    resistance_1 = latest_record[10]
+
+    if trend == "Uptrend":
+        buy_value = latest_record.close  # Buy at the latest closing price
+        stop_loss = support_1 * 0.98  # Set stop loss 2% below the nearest support level
+        logging.info(f"Buy value: {buy_value}, Stop loss: {stop_loss}")
+        return buy_value, stop_loss, "buy"
+    elif trend == "Downtrend":
+        sell_value = latest_record.close  # Short sell at the latest closing price
+        stop_loss = resistance_1 * 1.02  # Set stop loss 2% above the nearest resistance level
+        logging.info(f"Sell value: {sell_value}, Stop loss: {stop_loss}")
+        return sell_value, stop_loss, "sell"
+    else:
+        logging.info("No trade signal as the trend is sideways.")
+        return None, None, None
 
 def main():
-    
-    create_database()
+    # create/update the database and tables
+    create_or_update_database()
 
-    #define date range
+    # define range
     to_date = datetime.datetime.now()
     from_date = to_date - datetime.timedelta(days=365)
 
@@ -145,19 +184,18 @@ def main():
     historical_data = {}
     for stock, token in stock_tokens.items():
         historical_data[stock] = fetch_historical_data(token, from_date, to_date)
-        store_data_in_database(stock, historical_data[stock])
+        #calculate trend immediately after fetching the data
+        db_data = [(record["date"], record["open"], record["high"], record["low"], record["close"], record["volume"]) for record in historical_data[stock]]
+        trends = calculate_trend(db_data)
+        store_data_in_database(stock, historical_data[stock], trends)
 
-    # Process data
-    for stock, data in historical_data.items():
+        # get data from the database to calculate buy value and stop loss
         db_data = fetch_data_from_db(stock)
-        support_resistance = calculate_support_resistance(db_data)
-        print(f"{stock} Support and Resistance: {support_resistance}")
+        trade_value, stop_loss, action = determine_buy_and_stop_loss(db_data)
+        if trade_value and stop_loss:
+            print(f"Stock: {stock}, Action: {action.capitalize()}, Value: {trade_value}, Stop Loss: {stop_loss}")
 
-        candle_types = identify_candle_type(db_data)
-        print(f"{stock} Candle Types: {candle_types}")
-
-        trends = identify_trends(db_data)
-        print(f"{stock} Trends: {trends}")
 
 if __name__ == "__main__":
     main()
+
